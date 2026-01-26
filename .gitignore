@@ -1,23 +1,51 @@
-# Rust
-/target/
-Cargo.lock
+# 编译生成的文件
+target/
 **/*.rs.bk
-*.pdb
+Cargo.lock
 
-# IDE
+# IDE和编辑器文件
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
-Thumbs.db
 
-# Logs
+# 操作系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 日志文件
 *.log
 
-# Temporary files
+# 临时文件
 *.tmp
 *.temp
+*.bak
+
+# Rustfmt备份文件
+**/*.rs.bk
+
+# 测试覆盖率
+tarpaulin-report.html
+cobertura.xml
+
+# 性能分析
+callgrind.out*
+cachegrind.out*
+callgrind.out.*
+cachegrind.out.*
+
+# 其他
+*.out
+*.exe
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+
+# Vibe_Synapse特定的
+/dev/  # 开发目录（如果存在）
+/test-results/  # 测试结果目录
