@@ -60,4 +60,12 @@ That's it. The framework will handle the rest.
 
 ## License / 许可
 
-MIT
+本框架采用 **MIT** 和 **Apache-2.0** 双许可。
+
+This framework is dual-licensed under **MIT** and **Apache-2.0**.
+
+您可以选择以下任一许可：
+- [MIT License](./LICENSE-MIT) - 简洁宽松，允许闭源商用
+- [Apache License 2.0](./LICENSE-APACHE) - 提供专利保护
+
+您可以自由选择适用于您的场景。

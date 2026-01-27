@@ -2,6 +2,10 @@
 name = "vibe_synapse"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Vibe_Synapse Contributors"]
+repository = "https://github.com/yourusername/vibe_synapse"
+description = "A minimalist, decoupled modular framework for Rust"
 
 [dependencies]
 # 框架核心依赖
