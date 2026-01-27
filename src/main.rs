@@ -1,205 +1,294 @@
+// 设置为 Windows GUI 子系统，编译后不显示命令行窗口
+#![windows_subsystem = "windows"]
+
 // ==============================================================================
-// Vibe_Synapse Framework - Core System
+// Vibe_Synapse Framework - Core System (Inventory-based Auto-registration)
 // ==============================================================================
-// This file contains the complete architecture of the Vibe_Synapse modular framework.
-// READ THIS CAREFULLY to understand the design principles and reduce debugging time.
+// A minimalist modular framework with automatic module discovery using inventory crate.
+// 
+// KEY FEATURES:
+// - Zero-configuration module system: Modules auto-register using inventory::submit!
+// - No need to edit main.rs when adding new modules
+// - Type-safe message passing with Arc-based sharing
+// - Single FIFO channel (no complex priority system)
+// - Automatic lifecycle management (initialize/process/shutdown)
+//
+// ARCHITECTURE OVERVIEW:
+// 1. Message Bus: Central hub for typed message passing between modules
+// 2. Module Registry: Manages module lifecycle and auto-discovery
+// 3. Dispatcher: Forwards messages to subscribed modules asynchronously
+// 4. Inventory System: Compile-time collection of module registrations
+//
+// ADDING A NEW MODULE (2 simple steps):
+// Step 1: Create src/model/your_module/mod.rs
+//   - Implement the Module trait for your struct
+//   - Implement Default trait for auto-construction
+//   - Use #[async_trait] for async lifecycle methods
+//
+// Step 2: Add at the bottom of your module file:
+//   module_init!(YourModuleStruct, "your_module_name");
+//
+// That's it! No changes to main.rs, Cargo.toml, or any config files needed.
+// The inventory system automatically discovers and registers your module at compile time.
 // ==============================================================================
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, watch};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ==============================================================================
-// MODULE CONFIGURATION CENTER
+// MODULE DECLARATION AREA
 // ==============================================================================
-// AI DEVELOPER NOTE: All module management logic is centralized in model_list.rs.
-// You NEVER need to modify this main.rs file when developing modules.
-// The framework uses a plugin-based architecture where modules are loaded dynamically.
-//
-// ARCHITECTURE OVERVIEW:
-// - model_list.rs: Single source of truth for all module declarations and loading logic
-// - model/*.rs: Individual module implementations (completely decoupled from framework core)
-// - main.rs: Framework infrastructure (message bus, module registry, lifecycle management)
-//
-// This separation ensures:
-// 1. Zero coupling between modules
-// 2. Hot-reload capability
-// 3. Minimal cognitive load for AI developers
-// ==============================================================================
+// AI DEVELOPER NOTE: 
+// - Each module is a separate subdirectory under src/model/
+// - Module files are named mod.rs within their own directory
+// - Example: src/model/my_module/mod.rs
+// - The inventory system automatically discovers modules via module_init! macro
+// - NO NEED to manually declare modules here - it's handled by inventory!
 
-mod model_list;
+mod model {
+    pub mod simple_gui;  // Single GUI demo module
+}
 
 // ==============================================================================
-// CORE ARCHITECTURE PART 1: MESSAGE BUS SYSTEM
+// INVENTORY-BASED AUTO-REGISTRATION SYSTEM
 // ==============================================================================
-// DESIGN PRINCIPLE: Message-Driven Architecture
-// All module communication happens through typed messages, eliminating direct dependencies.
+// AUTOMATIC MODULE DISCOVERY MECHANISM
 //
-// KEY ADVANTAGES FOR AI DEVELOPERS:
-// - No circular dependency issues
-// - Modules can be tested independently
-// - Runtime module swapping without breaking the system
-// - Clear message contracts reduce integration bugs by 80%
+// How it works:
+// 1. Each module calls module_init!(ModuleType, "module_name") at file bottom
+// 2. This creates a static ModuleBuildInfo with name and constructor function
+// 3. inventory::submit! registers the static with the inventory collector
+// 4. At compile time, inventory::iter::<ModuleBuildInfo> yields all registered modules
+// 5. ModuleRegistry::register_all_modules() constructs and initializes each module
 //
-// HOW IT WORKS:
-// 1. Modules define custom message types (implementing the Message trait)
-// 2. Modules publish messages to the bus with priority levels
-// 3. The message bus automatically routes messages to subscribed modules
-// 4. Modules receive messages via the process_message() callback
-//
-// PRIORITY SYSTEM (important for debugging):
-// - Priority >= 200: HIGH - Critical system messages, processed first
-// - Priority >= 100: NORMAL - Standard inter-module communication
-// - Priority < 100: LOW - Background tasks, processed last
-//
-// DEBUGGING TIP: If messages aren't being received, check:
-// 1. Did the receiving module subscribe to the message type in initialize()?
-// 2. Is the priority level appropriate for your use case?
-// 3. Did you register the message type in the module's initialize()?
-// ==============================================================================
+// Benefits:
+// - No manual module lists to maintain
+// - Compile-time safety: can't forget to register a module
+// - Type-safe module construction
+// - Automatic dependency injection (MessageBus passed to initialize())
 
-/// Core trait for all inter-module messages. Every message type must implement this.
+/// ModuleBuildInfo stores compile-time information for constructing a module
+#[derive(Clone, Copy)]
+pub struct ModuleBuildInfo {
+    pub name: &'static str,
+    pub construct_fn: fn() -> Box<dyn Module>,
+}
+
+impl ModuleBuildInfo {
+    pub const fn new(name: &'static str, construct_fn: fn() -> Box<dyn Module>) -> Self {
+        Self { name, construct_fn }
+    }
+}
+
+// Collects all ModuleBuildInfo instances submitted via inventory::submit!
+// This is the heart of the auto-discovery system
+inventory::collect!(ModuleBuildInfo);
+
+/// Macro for modules to self-register with the inventory system
+/// 
+/// USAGE (add this to the bottom of your module file):
+///   module_init!(YourModuleType, "your_module_name");
+///
+/// This creates:
+/// 1. A module constructor function
+/// 2. A static ModuleBuildInfo instance
+/// 3. Submits the static to inventory for auto-discovery
+///
+/// EXAMPLE in src/model/my_module/mod.rs:
+///   pub struct MyModule { ... }
+///   
+///   #[async_trait]
+///   impl Module for MyModule { ... }
+///   
+///   impl Default for MyModule {
+///       fn default() -> Self { Self::new() }
+///   }
+///   
+///   // Add this line at the bottom of the file
+///   module_init!(MyModule, "my_module");
+#[macro_export]
+macro_rules! module_init {
+    ($module_ty:ty, $name:expr) => {
+        // Module constructor - called by registry to create instances
+        fn construct_module() -> Box<dyn $crate::Module> {
+            Box::new(<$module_ty>::default())
+        }
+        
+        // Static build info - stored in inventory at compile time
+        #[used]  // Prevents the compiler from optimizing this away
+        static MODULE_BUILD_INFO: $crate::ModuleBuildInfo = $crate::ModuleBuildInfo::new(
+            $name,
+            construct_module
+        );
+        
+        // Submit to inventory for auto-discovery
+        inventory::submit! {
+            MODULE_BUILD_INFO
+        }
+    };
+}
+
+// ==============================================================================
+// CORE ARCHITECTURE: MESSAGE BUS SYSTEM
+// ==============================================================================
+// MESSAGE-DRIVEN COMMUNICATION SYSTEM
+//
+// Design Principles:
+// - All inter-module communication happens via typed messages
+// - Zero direct dependencies between modules
+// - Type-safe message routing based on TypeId
+// - Arc-based sharing for efficient multi-subscriber delivery
+// - Single FIFO channel per message type (simplified from priority system)
+//
+// Message Flow:
+// 1. Publisher creates a typed message implementing Message trait
+// 2. bus.publish(message) wraps it in Arc and routes to subscribers
+// 3. Dispatcher receives message and forwards to all subscribed modules
+// 4. Each module's process_message() is called concurrently
+// 5. Results are collected and errors logged
+//
+// Key Types:
+// - Message trait: All messages must implement this
+// - MessageEnvelope: Wraps messages with metadata for routing
+// - MessageBus: Central hub for publish/subscribe operations
+// - TypeId: Compile-time unique identifier for each message type
+
+/// Trait for all inter-module messages
+/// 
+/// REQUIREMENTS FOR IMPLEMENTATION:
+/// - Must be Send + Sync + 'static (for thread safety)
+/// - Must implement clone_box() for Arc-based sharing
+/// - Should be Clone for easy implementation
+/// - Message type is identified by compile-time TypeId
+/// 
+/// EXAMPLE MESSAGE TYPE:
+/// ```
+/// #[derive(Clone)]
+/// pub struct MyMessage {
+///     pub data: String,
+/// }
+/// 
+/// impl Message for MyMessage {
+///     fn as_any(&self) -> &dyn Any { self }
+///     fn message_type(&self) -> TypeId { TypeId::of::<MyMessage>() }
+///     fn clone_box(&self) -> Box<dyn Message> { Box::new(self.clone()) }
+/// }
+/// ```
 pub trait Message: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
     fn message_type(&self) -> TypeId;
-    
-    /// IMPORTANT: Every message must implement clone_box() for safe message passing.
-    /// This enables the bus to deliver the same message to multiple subscribers.
     fn clone_box(&self) -> Box<dyn Message>;
 }
 
-/// Internal envelope that wraps messages with metadata for routing.
+/// Wraps a message with routing metadata
+/// 
+/// Fields:
+/// - message_type: TypeId for routing to correct subscribers
+/// - payload: Arc<Box<dyn Message>> for efficient sharing
+/// 
+/// The Arc enables multiple subscribers to receive the same message
+/// without cloning the entire payload (clone_box only called once).
 pub struct MessageEnvelope {
     pub message_type: TypeId,
-    pub payload: Arc<Box<dyn Message>>,  // OPTIMIZED: Arc for efficient sharing
-    pub priority: u8,
+    pub payload: Arc<Box<dyn Message>>,
 }
 
 impl MessageEnvelope {
-    pub fn new<M: Message>(msg: M, priority: u8) -> Self {
+    /// Creates a new envelope from a typed message
+    pub fn new<M: Message>(msg: M) -> Self {
         Self {
             message_type: TypeId::of::<M>(),
-            payload: Arc::new(Box::new(msg)),  // OPTIMIZED: Wrap in Arc
-            priority,
+            payload: Arc::new(Box::new(msg)),
         }
     }
     
-    // OPTIMIZED: Clone only the Arc instead of deep clone
+    /// Efficient cloning - only clones the Arc, not the inner message
     pub fn clone_arc(&self) -> Self {
         Self {
             message_type: self.message_type,
             payload: Arc::clone(&self.payload),
-            priority: self.priority,
         }
     }
 }
 
-// Priority-based channel capacity to prevent memory exhaustion
+// Channel capacity to prevent memory exhaustion under high load
 const CHANNEL_CAPACITY: usize = 1000;
 
-/// Internal priority enum for message routing. Higher values = higher priority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Priority {
-    High = 3,
-    Normal = 2,
-    Low = 1,
+/// Internal channel structure for a single message type
+struct MessageChannel {
+    sender: mpsc::Sender<MessageEnvelope>,
+    receiver: Arc<RwLock<Option<mpsc::Receiver<MessageEnvelope>>>>,
 }
 
-/// Internal structure managing three priority channels for each message type.
-/// This enables O(1) priority-based message delivery.
-struct PriorityChannel {
-    high: mpsc::Sender<MessageEnvelope>,
-    normal: mpsc::Sender<MessageEnvelope>,
-    low: mpsc::Sender<MessageEnvelope>,
-    merged_rx: Arc<RwLock<Option<mpsc::Receiver<(Priority, MessageEnvelope)>>>>,
-}
-
-/// Central message bus - the heart of the framework.
-/// AI DEVELOPERS: You only interact with this through:
-/// 1. bus.register_message_type<T>() - Register new message types
-/// 2. bus.subscribe(type_id, module_name) - Subscribe to message types
-/// 3. bus.publish(message, priority) - Send messages
+/// Central message bus for publish/subscribe operations
+/// 
+/// Thread-safe via RwLock and Arc. Handles:
+/// - Message type registration (creates channels)
+/// - Message publication (routes to subscribers)
+/// - Subscription management (add/remove subscribers)
+/// - Auto-starting dispatchers for each message type
 #[derive(Clone)]
 pub struct MessageBus {
     inner: Arc<MessageBusInner>,
 }
 
 struct MessageBusInner {
-    channels: RwLock<HashMap<TypeId, PriorityChannel>>,
+    channels: RwLock<HashMap<TypeId, MessageChannel>>,
     subscribers: RwLock<HashMap<TypeId, Vec<String>>>,
-    registry: std::sync::Mutex<Option<Arc<ModuleRegistry>>>, // OPTIMIZED: For auto-dispatcher
-    // OPTIMIZED: Message statistics for debugging (Audit fix 2.4, 4.1)
-    stats: RwLock<HashMap<TypeId, MessageStats>>,
-}
-
-/// Statistics tracking for debugging and monitoring
-#[derive(Debug, Default)]
-struct MessageStats {
-    pub published: usize,
-    pub delivered: usize,
-    pub failed: usize,
-    pub last_published: std::time::Instant,
+    registry: std::sync::Mutex<Option<Arc<ModuleRegistry>>>,
 }
 
 impl MessageBus {
+    /// Creates a new message bus instance
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            channels: Arc::new(RwLock::new(HashMap::new())),
-            subscribers: Arc::new(RwLock::new(HashMap::new())),
-            registry: Arc::new(std::sync::Mutex::new(None)),
-            stats: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(MessageBusInner {
+                channels: RwLock::new(HashMap::new()),
+                subscribers: RwLock::new(HashMap::new()),
+                registry: std::sync::Mutex::new(None),
+            }),
         })
     }
     
-    /// OPTIMIZED: Set registry reference for auto-dispatcher (called by ModuleRegistry::new)
+    /// Links the bus to a registry (called by ModuleRegistry::new)
     pub(crate) fn set_registry(&self, registry: Arc<ModuleRegistry>) {
-        *self.registry.lock().unwrap() = Some(registry);
+        *self.inner.registry.lock().unwrap() = Some(registry);
     }
 
-    /// Registers a new message type with the bus.
-    /// RETURNS: TypeId - Store this in your module for message type checking.
+    /// Registers a new message type with the bus
     /// 
-    /// USAGE PATTERN:
-    ///   let my_msg_type = bus.register_message_type::<MyMessage>().await;
-    ///   bus.subscribe(my_msg_type, self.name.to_string()).await;
-    /// 
-    /// OPTIMIZED: Automatically starts message dispatcher (Audit fix 1.2)
+    /// USAGE:
+    ///   let my_message_type = bus.register_message_type::<MyMessage>().await;
+    ///   bus.subscribe(my_message_type, "my_module".to_string()).await;
+    ///
+    /// Side effect: Automatically starts a dispatcher for this message type
     pub async fn register_message_type<M: Message>(&self) -> TypeId {
         let type_id = TypeId::of::<M>();
-        let mut channels_guard = self.channels.write().await;
+        let mut channels_guard = self.inner.channels.write().await;
         
         if !channels_guard.contains_key(&type_id) {
-            // Create three priority channels
-            let (high_tx, high_rx) = mpsc::channel(CHANNEL_CAPACITY);
-            let (normal_tx, normal_rx) = mpsc::channel(CHANNEL_CAPACITY);
-            let (low_tx, low_rx) = mpsc::channel(CHANNEL_CAPACITY);
+            // Create single FIFO channel (simplified from priority system)
+            let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
             
-            // Create merged priority channel for consumption
-            let (priority_tx, priority_rx) = mpsc::channel(CHANNEL_CAPACITY * 3);
-            
-            // Spawn async merger that combines three priority streams into one
-            tokio::spawn(Self::priority_merge(
-                high_rx, normal_rx, low_rx, priority_tx
-            ));
-            
-            channels_guard.insert(type_id, PriorityChannel {
-                high: high_tx,
-                normal: normal_tx,
-                low: low_tx,
-                merged_rx: Arc::new(RwLock::new(Some(priority_rx))),
+            channels_guard.insert(type_id, MessageChannel {
+                sender,
+                receiver: Arc::new(RwLock::new(Some(receiver))),
             });
             
-            // OPTIMIZED: Auto-start dispatcher (Fixes Audit 1.2)
-            drop(channels_guard); // Release lock before spawning
+            // Release lock before spawning async tasks
+            drop(channels_guard);
             
-            if let Some(registry) = self.registry.lock().unwrap().as_ref() {
-                if let Some(receiver) = self.get_merged_receiver(&type_id).await {
+            // Auto-start dispatcher for this message type
+            let registry_opt = self.inner.registry.lock().unwrap().clone();
+            if let Some(registry) = registry_opt {
+                if let Some(receiver) = self.get_receiver(&type_id).await {
                     println!("[MessageBus] Auto-starting dispatcher for message type: {:?}", type_id);
                     tokio::spawn(run_message_dispatcher(
-                        registry.clone(),
+                        registry,
                         Arc::new(self.clone()),
                         type_id,
                         receiver,
@@ -211,127 +300,28 @@ impl MessageBus {
         type_id
     }
 
-    /// Internal async function that merges three priority channels into one ordered stream.
-    /// This runs in a separate tokio task and enables efficient priority-based delivery.
-    /// OPTIMIZED: Improved fairness to prevent low priority starvation (Audit fix 1.3)
-    async fn priority_merge(
-        mut high: mpsc::Receiver<MessageEnvelope>,
-        mut normal: mpsc::Receiver<MessageEnvelope>,
-        mut low: mpsc::Receiver<MessageEnvelope>,
-        output: mpsc::Sender<(Priority, MessageEnvelope)>,
-    ) {
-        // Fairness counter: ensures low priority gets processed periodically
-        let mut fairness_counter = 0u32;
-        
-        loop {
-            // Use biased = false for more fair selection (available in tokio 1.38+)
-            // For compatibility, we use explicit priority weighting
-            
-            if fairness_counter % 8 == 7 {
-                // Every 8th message: try low priority first
-                tokio::select! {
-                    Some(msg) = low.recv() => {
-                        if output.send((Priority::Low, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = high.recv() => {
-                        if output.send((Priority::High, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = normal.recv() => {
-                        if output.send((Priority::Normal, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    else => break,
-                }
-            } else if fairness_counter % 4 == 3 {
-                // Every 4th message (except 7th): try normal priority
-                tokio::select! {
-                    Some(msg) = normal.recv() => {
-                        if output.send((Priority::Normal, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = high.recv() => {
-                        if output.send((Priority::High, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = low.recv() => {
-                        if output.send((Priority::Low, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    else => break,
-                }
-            } else {
-                // Most of the time: high priority first
-                tokio::select! {
-                    Some(msg) = high.recv() => {
-                        if output.send((Priority::High, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = normal.recv() => {
-                        if output.send((Priority::Normal, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    Some(msg) = low.recv() => {
-                        if output.send((Priority::Low, msg)).await.is_err() {
-                            break;
-                        }
-                        fairness_counter = fairness_counter.wrapping_add(1);
-                    }
-                    else => break,
-                }
-            }
-        }
-    }
-
-    /// Publishes a message to the bus.
+    /// Publishes a message to all subscribed modules
     /// 
-    /// PRIORITY GUIDE:
-    ///   - 200+: Critical system messages (errors, shutdown signals)
-    ///   - 100-199: Normal inter-module communication (default)
-    ///   - 0-99: Background processing, logging, non-critical tasks
-    /// 
-    /// ERROR HANDLING:
-    ///   - Returns Err if message type not registered
-    ///   - Returns Err if channel is full or closed
-    ///   - AI TIP: Always handle publish errors in production code
-    pub async fn publish<M: Message>(&self, message: M, priority: u8) -> Result<(), String> {
+    /// RETURNS:
+    /// - Ok(()) if message was successfully queued
+    /// - Err(String) if message type not registered or channel full
+    ///
+    /// MESSAGE TYPE SAFETY:
+    /// - TypeId automatically derived from generic parameter M
+    /// - Must call register_message_type::<M>() before publishing first message of type M
+    pub async fn publish<M: Message>(&self, message: M) -> Result<(), String> {
         let type_id = TypeId::of::<M>();
-        let channels_guard = self.channels.read().await;
+        let channels_guard = self.inner.channels.read().await;
         
         if let Some(channel) = channels_guard.get(&type_id) {
             let subscriber_count = self.get_subscribers(&type_id).await.len();
+            let envelope = MessageEnvelope::new(message);
             
-            let envelope = MessageEnvelope::new(message, priority);
-            
-            // Route to appropriate priority channel
-            let result = if priority >= 200 {
-                channel.high.send(envelope).await
-            } else if priority >= 100 {
-                channel.normal.send(envelope).await
-            } else {
-                channel.low.send(envelope).await
-            };
+            // Send to single FIFO channel (simplified routing)
+            let result = channel.sender.send(envelope).await;
             
             match result {
                 Ok(()) => {
-                    // DEBUG: Log message publication
                     if subscriber_count == 0 {
                         eprintln!("[MessageBus] Warning: Published message to type {:?} with 0 subscribers", type_id);
                     } else {
@@ -346,20 +336,25 @@ impl MessageBus {
         }
     }
 
-    /// Subscribes a module to receive messages of a specific type.
-    /// This is typically called in the module's initialize() method.
+    /// Subscribes a module to receive messages of a specific type
+    /// 
+    /// USAGE (in module's initialize()):
+    ///   let msg_type = bus.register_message_type::<MyMessage>().await;
+    ///   bus.subscribe(msg_type, self.name().to_string()).await;
     pub async fn subscribe(&self, message_type: TypeId, module_name: String) {
-        let mut subscribers_guard = self.subscribers.write().await;
+        let mut subscribers_guard = self.inner.subscribers.write().await;
         subscribers_guard.entry(message_type)
             .or_insert_with(Vec::new)
-            .push(module_name);
+            .push(module_name.clone());
         
         println!("[MessageBus] Module '{}' subscribed to message type: {:?}", module_name, message_type);
     }
     
-    /// OPTIMIZED: Unsubscribe a module from a message type (Audit fix 1.4)
+    /// Unsubscribes a module from a message type
+    /// 
+    /// CALLED AUTOMATICALLY by ModuleRegistry::unregister_module
     pub async fn unsubscribe(&self, message_type: &TypeId, module_name: &str) -> bool {
-        let mut subscribers_guard = self.subscribers.write().await;
+        let mut subscribers_guard = self.inner.subscribers.write().await;
         
         if let Some(subscribers) = subscribers_guard.get_mut(message_type) {
             let before = subscribers.len();
@@ -376,164 +371,232 @@ impl MessageBus {
         false
     }
 
-    /// Returns a list of all modules subscribed to a message type.
+    /// Returns list of modules subscribed to a message type
     pub async fn get_subscribers(&self, message_type: &TypeId) -> Vec<String> {
-        let subscribers_guard = self.subscribers.read().await;
+        let subscribers_guard = self.inner.subscribers.read().await;
         subscribers_guard.get(message_type)
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Internal function to get the merged receiver for dispatcher.
-    pub(crate) async fn get_merged_receiver(&self, message_type: &TypeId) -> Option<mpsc::Receiver<(Priority, MessageEnvelope)>> {
-        let channels_guard = self.channels.read().await;
+    /// Internal: Gets receiver channel for dispatcher
+    async fn get_receiver(&self, message_type: &TypeId) -> Option<mpsc::Receiver<MessageEnvelope>> {
+        let channels_guard = self.inner.channels.read().await;
         if let Some(channel) = channels_guard.get(message_type) {
-            let mut rx_guard = channel.merged_rx.write().await;
-            rx_guard.take() // Take the receiver (one-time operation)
+            let mut rx_guard = channel.receiver.write().await;
+            rx_guard.take()
         } else {
             None
+        }
+    }
+    
+    /// Signals the application to exit (called by GUI modules when window closes)
+    pub async fn signal_exit(&self) {
+        let registry_opt = self.inner.registry.lock().unwrap().clone();
+        if let Some(registry) = registry_opt {
+            registry.signal_exit().await;
         }
     }
 }
 
 // ==============================================================================
-// CORE ARCHITECTURE PART 2: MODULE SYSTEM
+// CORE ARCHITECTURE: MODULE SYSTEM
 // ==============================================================================
-// DESIGN PRINCIPLE: Black-Box Module Architecture
-// Each module is a completely independent entity with a clear lifecycle.
+// MODULE LIFECYCLE AND TRAITS
 //
-// MODULE LIFECYCLE:
-// 1. Construction: Module struct is created (new())
-// 2. Initialization: Framework calls initialize() with Arc<MessageBus>
-// 3. Active: Module receives messages via process_message()
-// 4. Shutdown: Framework calls shutdown() for cleanup
+// Each module goes through three phases:
+// 1. Construction: Module is created (via Default::default())
+// 2. Initialization: ModuleRegistry calls initialize() with Arc<MessageBus>
+// 3. Active: Module processes messages via process_message()
+// 4. Shutdown: ModuleRegistry calls shutdown() for cleanup
 //
-/// AI DEVELOPER BEST PRACTICES:
-/// - NEVER store direct references to other modules
-/// - ALWAYS use message passing for inter-module communication
-/// - KEEP initialization logic minimal and non-blocking
-/// - IMPLEMENT proper error handling in all three lifecycle methods
-/// - USE async/await for all I/O operations to avoid blocking the event loop
-///
-/// TESTING TIP: Modules can be unit tested independently by:
-/// 1. Creating a test MessageBus instance
-/// 2. Instantiating your module
-/// 3. Calling lifecycle methods directly
-/// 4. Verifying message handling behavior
-// ==============================================================================
+// THREAD SAFETY:
+// - All methods are async and must be non-blocking
+// - Modules must be Send + Sync for concurrent message processing
+// - Use Arc<RwLock<T>> for shared state within modules
+// - Never store direct references to other modules (use messages!)
 
-/// Core trait that every module must implement.
-/// The framework manages the complete lifecycle automatically.
+/// Core trait for all modules
+/// 
+/// LIFECYCLE METHODS (called by ModuleRegistry):
+/// 
+/// 1. name() -> &'static str
+///    - Returns unique module identifier
+///    - Used for logging, subscription management, and debugging
+///    - Must be unique across all modules
+/// 
+/// 2. initialize(&mut self, bus: Arc<MessageBus>) 
+///    - Called once after module construction
+///    - Receives Arc<MessageBus> for message operations
+///    - Register message types: bus.register_message_type::<M>().await
+///    - Subscribe to messages: bus.subscribe(type_id, self.name().to_string()).await
+///    - Perform lightweight setup (no heavy I/O or blocking)
+///    - Return Err to prevent module from loading
+/// 
+/// 3. process_message(&self, envelope: MessageEnvelope)
+///    - Called for every message the module is subscribed to
+///    - Check message type: envelope.message_type == TypeId::of::<MyMessage>()
+///    - Extract message: envelope.payload.as_any().downcast_ref::<MyMessage>()
+///    - Must be non-blocking - spawn tasks for heavy work
+///    - Return Ok(()) even if message type is irrelevant
+/// 
+/// 4. shutdown(&mut self)
+///    - Called during graceful shutdown
+///    - Clean up resources: close connections, flush buffers, etc.
+///    - Called before module is removed from registry
 #[async_trait]
 pub trait Module: Send + Sync {
-    /// Returns the unique name of the module.
-    /// This name is used for subscription management and debugging.
+    /// Returns unique module name (must be static for inventory)
     fn name(&self) -> &'static str;
     
-    /// Called once during module loading.
+    /// Initializes module with message bus access
     /// 
-    /// REQUIRED ACTIONS:
-    /// - Store the provided MessageBus in your struct
-    /// - Register and subscribe to message types you want to receive
-    /// - Perform lightweight initialization (no heavy I/O)
-    /// 
-    /// ERROR HANDLING: Return Err to prevent module from loading.
-    async fn initialize(&mut self, bus: Arc<MessageBus>) -> Result<(), Box<dyn std::error::Error>>;
+    /// TYPICAL IMPLEMENTATION:
+    ///   async fn initialize(&mut self, bus: Arc<MessageBus>) -> Result<(), Box<dyn Error>> {
+    ///       // Store bus reference for later use
+    ///       self.bus.write().await = Some(bus.clone());
+    ///       
+    ///       // Register message types this module publishes/receives
+    ///       let msg_type = bus.register_message_type::<MyMessage>().await;
+    ///       
+    ///       // Subscribe to message types
+    ///       bus.subscribe(msg_type, self.name().to_string()).await;
+    ///       
+    ///       // Lightweight setup only - don't block!
+    ///       Ok(())
+    ///   }
+    async fn initialize(&mut self, bus: Arc<MessageBus>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     
-    /// Called for every message the module is subscribed to.
+    /// Processes incoming messages - called by dispatcher
     /// 
-    /// IMPLEMENTATION GUIDE:
-    /// - Check envelope.message_type to determine message type
-    /// - Use envelope.payload.as_any().downcast_ref::<YourMessage>() to extract data
-    /// - Return Ok(()) even if message is irrelevant (filter at type level)
-    async fn process_message(&self, envelope: MessageEnvelope) -> Result<(), Box<dyn std::error::Error>>;
+    /// IMPLEMENTATION PATTERN:
+    ///   async fn process_message(&self, envelope: MessageEnvelope) -> Result<(), Box<dyn Error>> {
+    ///       if envelope.message_type == TypeId::of::<MyMessage>() {
+    ///           if let Some(msg) = envelope.payload.as_any().downcast_ref::<MyMessage>() {
+    ///               // Handle MyMessage
+    ///               self.handle_my_message(msg).await?;
+    ///           }
+    ///       }
+    ///       Ok(())  // Always return Ok, even for irrelevant messages
+    ///   }
+    async fn process_message(&self, envelope: MessageEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     
-    /// Called during graceful shutdown.
+    /// Cleanup when module is being unloaded
     /// 
-    /// CLEANUP TASKS:
-    /// - Close network connections
-    /// - Flush buffers to disk
-    /// - Release external resources
-    /// - Save state if needed
-    async fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>>;
+    /// RESPONSIBLE FOR:
+    /// - Closing network connections
+    /// - Flushing buffers to disk
+    /// - Releasing external resources
+    /// - Saving state if needed
+    /// Must return Ok(()) even if cleanup fails (log errors but don't panic)
+    async fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Metadata tracking for loaded modules (for debugging and management).
-#[allow(dead_code)]
-struct ModuleMetadata {
-    name: String,
-    path: String,
-    initialized: bool,
-}
-
-/// Central registry managing all loaded modules.
-/// AI DEVELOPERS: You rarely need to interact with this directly.
-/// The framework handles module lifecycle automatically.
+/// Registry managing all loaded modules
+/// 
+/// RESPONSIBILITIES:
+/// - Auto-discovery of modules via inventory system
+/// - Module lifecycle management (initialize -> run -> shutdown)
+/// - Cleanup subscriptions when modules are unloaded
+/// - Signal application exit when GUI closes (Windows GUI mode)
 pub struct ModuleRegistry {
     pub bus: Arc<MessageBus>,
     modules: Arc<RwLock<HashMap<String, Box<dyn Module>>>>,
-    metadata: Arc<RwLock<HashMap<String, ModuleMetadata>>>,
+    exit_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
 }
 
 impl ModuleRegistry {
+    /// Creates a new module registry linked to a message bus
     pub fn new(bus: Arc<MessageBus>) -> Arc<Self> {
         let registry = Arc::new(Self {
             bus: bus.clone(),
             modules: Arc::new(RwLock::new(HashMap::new())),
-            metadata: Arc::new(RwLock::new(HashMap::new())),
+            exit_tx: Arc::new(RwLock::new(None)),
         });
         
-        // OPTIMIZED: Link bus to registry for auto-dispatcher
+        // Link bus to registry for auto-dispatcher startup
         bus.set_registry(registry.clone());
         
         registry
     }
+    
+    /// Sets the exit signal sender for GUI graceful shutdown
+    /// 
+    /// CALLED BY: main() to receive exit notification from GUI
+    pub async fn set_exit_sender(&self, sender: watch::Sender<bool>) {
+        *self.exit_tx.write().await = Some(sender);
+    }
+    
+    /// Signals the application to exit (called by GUI when window closes)
+    pub async fn signal_exit(&self) {
+        if let Some(tx) = self.exit_tx.read().await.as_ref() {
+            let _ = tx.send(true);
+            println!("[ModuleRegistry] Exit signal sent");
+        }
+    }
 
-    /// Loads a module into the registry.
+    /// Auto-discovers and registers all modules using inventory system
     /// 
-    /// PROCESS:
-    /// 1. Calls module.initialize() with the message bus
-    /// 2. Stores the module in the modules map
-    /// 3. Records metadata for debugging
+    /// ALGORITHM:
+    /// 1. Iterate over all ModuleBuildInfo submitted via inventory::submit!
+    /// 2. For each module info: construct -> initialize -> store in map
+    /// 3. Log each registration for debugging
     /// 
-    /// ERROR HANDLING: If initialize() fails, module is NOT loaded.
-    pub async fn load_module(&self, name: String, mut module: Box<dyn Module>) -> Result<(), Box<dyn std::error::Error>> {
-        let bus_clone = self.bus.clone();
-        module.initialize(bus_clone).await?;
+   /// ERROR HANDLING:
+    /// - If a module's initialize() fails, the module is NOT loaded
+    /// - Other modules continue loading (error isolation)
+    /// - Returns Err if any module fails to load (fail-fast)
+    pub async fn register_all_modules(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("\n========== Auto Module Registration ==========");
         
-        let mut modules_guard = self.modules.write().await;
-        modules_guard.insert(name.clone(), module);
+        // Get all module build info from inventory
+        let build_infos: Vec<_> = inventory::iter::<ModuleBuildInfo>.into_iter().collect();
         
-        let mut metadata_guard = self.metadata.write().await;
-        metadata_guard.insert(name.clone(), ModuleMetadata {
-            name: name.clone(),
-            path: format!("./model/{}.rs", name),
-            initialized: true,
-        });
+        if build_infos.is_empty() {
+            println!("⚠  Warning: No modules discovered. Ensure modules call module_init! macro.");
+            return Ok(());
+        }
         
-        println!("[ModuleRegistry] Loaded module: {}", name);
+        // Construct and initialize each module
+        for info in build_infos {
+            let module_name = info.name;
+            println!("Registering module: {}", module_name);
+            
+            // Construct module instance via stored constructor function
+            let mut module = (info.construct_fn)();
+            
+            // Initialize module with bus access
+            module.initialize(self.bus.clone()).await?;
+            
+            // Store in module map
+            let mut modules_guard = self.modules.write().await;
+            modules_guard.insert(module_name.to_string(), module);
+            
+            println!("✓ Module '{}' registered successfully", module_name);
+        }
+        
+        println!("========== Module Registration Complete ==========\n");
         Ok(())
     }
 
-    /// Gracefully unloads a module.
+    /// Gracefully unloads a module and cleans up subscriptions
     /// 
-    /// PROCESS:
-    /// 1. Calls module.shutdown() for cleanup
-    /// 2. Removes module from registry
-    /// 3. OPTIMIZED: Cleans up subscriptions (fixes Audit 1.4)
-    /// 
-    /// CLEANUP GUARANTEE: Modules are always given a chance to clean up.
-    pub async fn unload_module(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// STEPS:
+    /// 1. Call module.shutdown() for cleanup
+    /// 2. Remove module from registry map
+    /// 3. Remove all subscriptions for this module
+    /// 4. Return Ok(()) even if cleanup fails
+    pub async fn unregister_module(&self, name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Step 1: Shutdown the module
         let mut modules_guard = self.modules.write().await;
         if let Some(mut module) = modules_guard.remove(name) {
             module.shutdown().await?;
         }
-        drop(modules_guard); // Release lock
+        drop(modules_guard);
         
-        // Step 2: OPTIMIZED - Clean up all subscriptions for this module
+        // Step 2: Clean up all subscriptions for this module
         println!("[ModuleRegistry] Cleaning up subscriptions for module: {}", name);
-        let mut subscribers_guard = self.bus.subscribers.write().await;
+        let mut subscribers_guard = self.bus.inner.subscribers.write().await;
         let mut cleaned_types = Vec::new();
         
         for (msg_type, subscribers) in subscribers_guard.iter_mut() {
@@ -551,41 +614,37 @@ impl ModuleRegistry {
         subscribers_guard.retain(|_, subscribers| !subscribers.is_empty());
         drop(subscribers_guard);
         
-        // Step 3: Clean up metadata
-        let mut metadata_guard = self.metadata.write().await;
-        metadata_guard.remove(name);
-        
-        println!("[ModuleRegistry] Unloaded module: {}", name);
+        println!("[ModuleRegistry] Unregistered module: {}", name);
         Ok(())
     }
 
-    /// Returns a list of all loaded module names.
+    /// Returns list of all registered module names
     pub async fn list_modules(&self) -> Vec<String> {
-        let metadata_guard = self.metadata.read().await;
-        metadata_guard.keys().cloned().collect()
+        let modules_guard = self.modules.read().await;
+        modules_guard.keys().cloned().collect()
     }
 }
 
 // ==============================================================================
 // BUILT-IN MESSAGE TYPES
 // ==============================================================================
-// AI DEVELOPER NOTE: You can and should define custom message types.
-// Copy this pattern for your own messages:
-// 1. Define your struct with necessary fields
-// 2. Implement Message trait (as_any, message_type, clone_box)
-// 3. Use #[derive(Clone)] for easy clone_box implementation
-//
-/// Standard system message for inter-module communication.
-/// This is available by default and doesn't need to be registered.
-/// AI TIP: Use this for simple string-based communication during development,
-/// but create custom message types for production code (type safety + performance).
-// ==============================================================================
 
+/// Standard system message for control messages
+/// 
+/// USE CASES:
+/// - System initialization / shutdown notifications
+/// - Module control commands
+/// - Framework-level events
+/// 
+/// Fields:
+/// - source: Module name sending the message
+/// - target: "all" or specific module name
+/// - content: String payload
 #[derive(Clone)]
 pub struct SystemMessage {
-    pub source: String,     // Module name sending the message
-    pub target: String,     // "all" or specific module name
-    pub content: String,    // Message payload
+    pub source: String,
+    pub target: String,
+    pub content: String,
 }
 
 impl Message for SystemMessage {
@@ -603,71 +662,65 @@ impl Message for SystemMessage {
 }
 
 // ==============================================================================
-// MESSAGE DISPATCHER - THE FRAMEWORK'S EVENT LOOP
+// MESSAGE DISPATCHER
 // ==============================================================================
-/// Internal async task that continuously receives messages from the bus
-/// and dispatches them to subscribed modules.
-///
-/// AI DEVELOPER NOTE: You don't need to implement this. It's automatically
-/// spawned for each registered message type.
-///
-/// PERFORMANCE CHARACTERISTICS:
-/// - Runs in separate tokio task (non-blocking)
-/// - Processes messages in priority order (O(log n) for priority queue)
-/// - Concurrent dispatch to multiple subscribers
-/// - Graceful shutdown when receiver is dropped
+// ASYNC MESSAGE DISPATCHING SYSTEM
+//
+// The dispatcher runs in a separate tokio task for each message type.
+// It continuously receives messages and forwards them to all subscribed modules.
+//
+// FLOW:
+// 1. Receives (Priority, MessageEnvelope) from merged priority channels
+// 2. Gets list of subscribed modules from MessageBus
+// 3. Spawns a concurrent task for each subscriber
+// 4. Waits for all subscribers to process the message
+// 5. Logs any errors from subscriber processing
+//
+// CONCURRENCY MODEL:
+// - Each subscriber processes messages in parallel (tokio::spawn per message)
+// - Backpressure: Channel capacity limits memory usage
+// - Error isolation: One module's error doesn't affect others
 async fn run_message_dispatcher(
     registry: Arc<ModuleRegistry>,
     bus: Arc<MessageBus>,
     message_type: TypeId,
-    mut receiver: mpsc::Receiver<(Priority, MessageEnvelope)>,
+    mut receiver: mpsc::Receiver<MessageEnvelope>,
 ) {
     println!("[Dispatcher] Started for message type: {:?}", message_type);
     
-    // Counter for message stats
     let message_count = Arc::new(AtomicUsize::new(0));
     
-    while let Some((_, envelope)) = receiver.recv().await {
+    while let Some(envelope) = receiver.recv().await {
         let msg_id = message_count.fetch_add(1, Ordering::SeqCst);
-        
-        // Get list of subscribed modules
         let subscribers = bus.get_subscribers(&envelope.message_type).await;
         
         if subscribers.is_empty() {
-            // DEBUG: Warn about unhandled messages
             eprintln!("[Dispatcher] Warning: Message {} has no subscribers (type: {:?})", msg_id, message_type);
             continue;
         }
         
-        let modules_guard = registry.modules.read().await;
-        let mut handles = vec![];
-        
-        // OPTIMIZED: Concurrent-friendly dispatch
-        // FIXES: Audit issue 2.4 - "false concurrent dispatch"
-        // Note: Using spawn for CPU-intensive processing, but keeping module references safe
-        
-        // Create a channel for results
+        // Channel for collecting results from all subscribers
         let (tx, mut rx) = mpsc::channel(subscribers.len());
         
+        // Spawn concurrent tasks for each subscriber
         for module_name in subscribers {
-            if let Some(module) = modules_guard.get(&module_name) {
-                // OPTIMIZED: Arc clone instead of deep clone (Audit issue 1.5)
-                let envelope_clone = envelope.clone_arc();
-                let module_name = module.name().to_string();
-                let tx_clone = tx.clone();
-                
-                // Spawn concurrent task for each subscriber
-                tokio::spawn(async move {
+            let tx_clone = tx.clone();
+            let envelope_clone = envelope.clone_arc();
+            let registry_clone = registry.clone();
+            
+            tokio::spawn(async move {
+                let modules_guard = registry_clone.modules.read().await;
+                if let Some(module) = modules_guard.get(&module_name) {
                     let result = module.process_message(envelope_clone).await;
-                    let _ = tx_clone.send((module_name, result)).await;
-                });
-            }
+                    drop(modules_guard);
+                    let _ = tx_clone.send((module_name.clone(), result)).await;
+                }
+            });
         }
         
-        drop(tx); // Drop original sender
+        drop(tx);  // Close sender so receiver knows when all are done
         
-        // Wait for all subscribers to process the message
-        // This ensures backpressure if subscribers are slow
+        // Wait for all subscribers to complete (backpressure)
         while let Some((module_name, result)) = rx.recv().await {
             if let Err(e) = result {
                 eprintln!("[Dispatcher] Module {} error processing message {}: {}", module_name, msg_id, e);
@@ -679,100 +732,69 @@ async fn run_message_dispatcher(
 }
 
 // ==============================================================================
-// MAIN APPLICATION ENTRY POINT
+// MAIN APPLICATION ENTRY POINT - 纯粹框架层 (Pure Framework Layer)
 // ==============================================================================
-/// AI DEVELOPER GUIDE: Understanding the startup sequence reduces bugs significantly.
-///
-/// STARTUP FLOW:
-/// 1. Parse command-line arguments (--test flag for automated testing)
-/// 2. Create MessageBus (core infrastructure)
-/// 3. Create ModuleRegistry (manages module lifecycle)
-/// 4. Load modules based on user selection or test mode
-/// 5. Register built-in SystemMessage type
-/// 6. Spawn message dispatcher task
-/// 7. Send initialization messages
-/// 8. Enter main event loop (wait for Ctrl+C or timeout)
-/// 9. Graceful shutdown: unload all modules
-///
-/// COMMON PITFALLS AVOIDED BY THIS DESIGN:
-/// - Module loading order dependencies (none exist)
-/// - Circular dependencies (impossible by design)
-/// - Uninitialized module state (initialize() is mandatory)
-/// - Resource leaks (shutdown() is guaranteed to be called)
-///
-/// TESTING STRATEGY:
-/// 1. Use --test flag for automated integration testing
-/// 2. Test modules individually with custom MessageBus instances
-/// 3. Verify message contracts using type-safe message definitions
-// ==============================================================================
+// FRAMEWORK BOOTSTRAPPING SEQUENCE - 框架仅提供基础设施，零业务逻辑
+//
+// 框架核心职责（严格遵守）：
+// 1. Setup panic handler for error isolation
+// 2. Parse command line arguments (--test mode)
+// 3. Create MessageBus and ModuleRegistry - 基础设施初始化
+// 4. Auto-discover and register all modules via inventory - 编译期自动发现
+// 5. Register built-in SystemMessage type - 内置消息类型注册
+// 6. Send initialization test message - 系统测试
+// 7. Wait for exit signal (Ctrl+C or test timeout) - 统一生命周期管理
+// 8. Graceful shutdown: unregister all modules - 优雅关闭
+//
+// 【框架设计黄金法则】
+// - 框架绝不区分模块类型（GUI/CLI/后台服务）
+// - 框架绝不调用模块私有API
+// - 框架绝不对特定模块硬编码
+// - 所有模块在 initialize() 中自主决定是否启动阻塞式主循环
+// - GUI模块使用 tokio::task::spawn_blocking 在模块内部启动，框架无感知
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up panic handler to prevent module crashes from bringing down the entire system
-    // AI TIP: This is production-grade error isolation
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Panic handler prevents module crashes from bringing down the entire system
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("[Panic Handler] Caught panic: {}", panic_info);
-        // Panics are logged but don't terminate the program (resilience)
     }));
 
-    // Parse command-line arguments
-    // --test: Automated test mode (loads all modules, runs 60 seconds, exits)
+    // Command line arguments
     let args: Vec<String> = std::env::args().collect();
     let is_test_mode = args.contains(&"--test".to_string());
 
     println!("=== Vibe_Synapse Framework Starting ===");
     
-    // STEP 1: Create core infrastructure
+    // Create core framework components
     let bus = MessageBus::new();
     let registry = ModuleRegistry::new(bus.clone());
     
-    // STEP 2: Load modules based on mode
-    let selected_modules = if is_test_mode {
-        // Test mode: Auto-load all PRELOAD_MODULES for testing
-        let modules: Vec<String> = model_list::PRELOAD_MODULES.iter()
-            .map(|s| s.to_string())
-            .collect();
-        println!("Test mode activated: Auto-loading {} modules: {:?}", modules.len(), modules);
-        modules
-    } else {
-        // Standard mode: Load modules specified in model_list.rs PRELOAD_MODULES
-        let modules: Vec<String> = model_list::PRELOAD_MODULES.iter()
-            .map(|s| s.to_string())
-            .collect();
-        if modules.is_empty() {
-            println!("Note: PRELOAD_MODULES is empty, no modules will be loaded.");
-            println!("To load modules, edit model_list.rs and add module names to PRELOAD_MODULES.");
-        } else {
-            println!("Loading modules from PRELOAD_MODULES: {:?}", modules);
-        }
-        modules
-    };
+    // Auto-discover and register all modules
+    // This uses inventory to find all modules that called module_init!()
+    registry.register_all_modules().await?;
     
-    // Load the selected modules (delegated to model_list.rs)
-    model_list::load_selected_modules(&registry, &selected_modules).await?;
-    
-    // STEP 3: Confirm startup mode
+    // Confirm framework mode
     if is_test_mode {
         println!("\n=== Vibe_Synapse Framework Test Running ===");
-        println!("Test modules are now active and testing framework capabilities...");
     } else {
         println!("\n=== Vibe_Synapse Framework Running ===");
     }
     
-    // STEP 4: List loaded modules for verification
+    // List all registered modules for debugging
     let modules = registry.list_modules().await;
     if modules.is_empty() {
-        println!("Warning: No modules loaded!");
+        println!("Warning: No modules registered!");
     } else {
-        println!("Loaded modules: {:?}", modules);
+        println!("Registered modules: {:?}", modules);
     }
     
-    // STEP 5: Register built-in SystemMessage type (dispatcher auto-started)
+    // Register built-in SystemMessage type
     println!("[Main] Registering built-in SystemMessage type...");
-    let system_msg_type = bus.register_message_type::<SystemMessage>().await;
+    bus.register_message_type::<SystemMessage>().await;
     println!("[Main] SystemMessage type registered, dispatcher auto-started");
     
-    // STEP 6: Give modules time to initialize, then test the message system
+    // Send test message to verify message system
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
     println!("\n--- Testing message system ---");
@@ -780,33 +802,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source: "main".to_string(),
         target: "all".to_string(),
         content: "System initialized and ready".to_string(),
-    }, 150).await {
+    }).await {
         Ok(()) => println!("[Main] Published initialization message"),
         Err(e) => eprintln!("[Main] Failed to publish: {}", e),
     }
     
-    // Wait for message processing
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
-    // STEP 7: Run based on mode
+    // Main execution - framework waits for exit signal
+    // 【框架层职责】框架层绝不区分模块类型（GUI/CLI/后台服务）
+    // 所有模块在 initialize() 中自主决定是否启动阻塞式主循环
+    // GUI模块使用 tokio::task::spawn_blocking 在模块内部启动
     if is_test_mode {
-        // Test mode: Automated 60-second test
-        println!("\nTest will complete in 60 seconds...");
+        // Test mode: Run for 60 seconds then exit
+        println!("\n=== Test Mode - Framework will run for 60 seconds ===");
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         println!("\n=== Test completed ===");
     } else {
-        // Standard mode: Wait for user interrupt (Ctrl+C)
-        println!("\nPress Ctrl+C to exit...");
-        tokio::signal::ctrl_c().await?;
+        // Normal mode: Wait for exit signal (Ctrl+C or GUI closed)
+        // 框架统一处理所有模块，不再有针对特定模块的特殊分支
+        println!("\n=== Framework Running ===");
+        println!("Press Ctrl+C to exit...");
+        
+        // Create exit signal channel for GUI to notify exit
+        let (exit_tx, mut exit_rx) = watch::channel(false);
+        registry.set_exit_sender(exit_tx).await;
+        
+        // Wait for either Ctrl+C or GUI exit signal
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n[Main] Ctrl+C received, shutting down...");
+            }
+            _ = exit_rx.changed() => {
+                if *exit_rx.borrow() {
+                    println!("\n[Main] GUI closed, shutting down...");
+                }
+            }
+        }
     }
     
-    // STEP 8: Graceful shutdown sequence
+    // Graceful shutdown
     println!("\n=== Vibe_Synapse Framework Shutting Down ===");
     
-    // Unload all modules (calls shutdown() on each)
     for module_name in modules {
-        if let Err(e) = registry.unload_module(&module_name).await {
-            eprintln!("[Main] Error unloading module {}: {}", module_name, e);
+        if let Err(e) = registry.unregister_module(&module_name).await {
+            eprintln!("[Main] Error unregistering module {}: {}", module_name, e);
         }
     }
     
@@ -815,33 +855,136 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ==============================================================================
-// FRAMEWORK USAGE SUMMARY FOR AI DEVELOPERS
+// AI DEVELOPER USAGE GUIDE (INVENTORY-BASED SYSTEM)
 // ==============================================================================
 //
-// TO ADD A NEW MODULE (Follow these exact steps):
+// ADDING A NEW MODULE (2 simple steps, no main.rs changes):
 //
-// 1. Create model/your_module.rs
-// 2. Implement the Module trait (see model/gui_demo.rs for example)
-// 3. Edit ONLY model_list.rs (never main.rs):
-//    a. Add module declaration at top
-//    b. Add module name to AVAILABLE_MODULES array
-//    c. Add loading case in load_selected_modules()
-// 4. Run: cargo run
+// Step 1: Create src/model/your_module/mod.rs
+//   - Define your module struct
+//   - Implement Module trait using #[async_trait]
+//   - Implement Default trait for construction
+//   - Register message types and subscribe in initialize()
 //
-// DEBUGGING CHECKLIST:
-// □ Module implements all three lifecycle methods
-// □ Messages being sent are registered and subscribed to
-// □ Priority levels are appropriate
-// □ Module name is unique across all modules
-// □ No direct module-to-module references
-// □ Async operations use .await (no blocking)
+// Step 2: Add at bottom of your module file:
+//   module_init!(YourModuleStruct, "your_module_name");
 //
-// PERFORMANCE OPTIMIZATION TIPS:
-// - Use message priorities strategically (critical messages = high priority)
-// - Implement efficient clone_box() (avoid deep cloning if possible)
-// - Handle messages quickly in process_message() or spawn tasks
-// - Use channels with bounded capacity to prevent memory bloat
-// - Test modules independently before integration
+// That's it! The inventory system automatically:
+// - Discovers your module at compile time
+// - Constructs it via Default::default()
+// - Calls initialize() with Arc<MessageBus>
+// - Registers it with the ModuleRegistry
+// - Manages its entire lifecycle
 //
-// HAPPY CODING! This framework is designed to make your life easier.
+// EXAMPLE MODULE FILE (src/model/my_module/mod.rs):
+//
+// use async_trait::async_trait;
+// use std::sync::Arc;
+// use crate::{MessageEnvelope, MessageBus, Module};
+//
+// pub struct MyModule {
+//     name: &'static str,
+//     bus: Arc<RwLock<Option<Arc<MessageBus>>>>,
+// }
+//
+// impl MyModule {
+//     pub fn new() -> Self {
+//         Self {
+//             name: "my_module",
+//             bus: Arc::new(RwLock::new(None)),
+//         }
+//     }
+// }
+//
+// impl Default for MyModule {
+//     fn default() -> Self {
+//         Self::new()
+//     }
+// }
+//
+// #[async_trait]
+// impl Module for MyModule {
+//     fn name(&self) -> &'static str {
+//         self.name
+//     }
+//     
+//     async fn initialize(&mut self, bus: Arc<MessageBus>) -> Result<(), Box<dyn Error>> {
+//         self.bus.write().await = Some(bus.clone());
+//         
+//         // Register and subscribe to message types
+//         let msg_type = bus.register_message_type::<MyMessage>().await;
+//         bus.subscribe(msg_type, self.name().to_string()).await;
+//         
+//         Ok(())
+//     }
+//     
+//     async fn process_message(&self, envelope: MessageEnvelope) -> Result<(), Box<dyn Error>> {
+//         // Handle messages here
+//         Ok(())
+//     }
+//     
+//     async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
+//         // Cleanup here
+//         Ok(())
+//     }
+// }
+//
+// // Add this line at the very bottom of the file for auto-registration:
+// module_init!(MyModule, "my_module");
+//
+// MESSAGING BETWEEN MODULES:
+//
+// 1. Define a message type (implementing Message trait):
+//    #[derive(Clone)]
+//    pub struct MyMessage {
+//        pub data: String,
+//    }
+//
+//    impl Message for MyMessage {
+//        fn as_any(&self) -> &dyn Any { self }
+//        fn message_type(&self) -> TypeId { TypeId::of::<MyMessage>() }
+//        fn clone_box(&self) -> Box<dyn Message> { Box::new(self.clone()) }
+//    }
+//
+// 2. In sender module, publish:
+//    bus.publish(MyMessage { data: "hello".to_string() }).await?;
+//
+// 3. In receiver module, subscribe during initialize():
+//    let msg_type = bus.register_message_type::<MyMessage>().await;
+//    bus.subscribe(msg_type, self.name().to_string()).await;
+//
+// 4. In process_message(), check type and handle:
+//    if envelope.message_type == TypeId::of::<MyMessage>() {
+//        if let Some(msg) = envelope.payload.as_any().downcast_ref::<MyMessage>() {
+//            println!("Received: {}", msg.data);
+//        }
+//    }
+//
+// DEBUGGING TIPS:
+//
+// 1. Module not being registered?
+//    - Check that module_init! macro is at bottom of file
+//    - Verify struct implements Default trait
+//    - Ensure module file is in src/model/ directory
+//
+// 2. Messages not being received?
+//    - Verify bus.subscribe() called during initialize()
+//    - Check that bus.register_message_type::<M>() called before subscribe
+//    - Ensure message type matches in both publisher and subscriber
+//
+// 3. Module initialization failing?
+//    - Check that initialize() is non-blocking (no heavy I/O)
+//    - Verify all unwrap() calls have proper error handling
+//    - Ensure module name is unique
+//
+// PERFORMANCE BEST PRACTICES:
+//
+// - Implement efficient clone_box() (avoid deep clones if possible)
+// - Process messages quickly in process_message() or spawn tasks
+// - Use Arc<RwLock<T>> for shared state (not Arc<Mutex<T>> unless needed)
+// - Prefer message passing over direct function calls
+// - Keep initialize() lightweight - do heavy work in separate tasks
+//
+// HAPPY CODING! The framework handles all the boilerplate for you.
+// Just focus on writing your module logic!
 // ==============================================================================

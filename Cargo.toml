@@ -4,22 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# 框架核心不依赖外部crate，模块可选择性引入依赖
+# 框架核心依赖
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 
-# GUI演示模块依赖
-windows = { version = "0.52", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_LibraryLoader",
-    "Win32_Graphics_Gdi"  # 添加GDI支持 for WHITE_BRUSH, GetStockObject
-] }
+# 自动注册插件系统
+inventory = "0.3"
 
-# 用于时间戳显示
-chrono = "0.4"
+# GUI模块依赖 - 使用 egui
+eframe = { version = "0.28", features = ["persistence"] }
+egui = "0.28"
+winit = "0.29"  # Required for event_loop_builder configuration
+tracing-subscriber = "0.3"
+tracing = "0.1"
 
 [[bin]]
 name = "vibe_synapse"
