@@ -1,0 +1,26 @@
+# Compiled files
+/target
+**/*.rs.bk
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+Thumbs.db
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Log files
+*.log
+
+# Temporary files
+/tmp
+/out
