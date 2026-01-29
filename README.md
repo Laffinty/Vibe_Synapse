@@ -1,8 +1,8 @@
 # Vibe_Synapse
 
-A minimalist, decoupled modular framework for Rust with an AI-friendly architecture, designed for automated module discovery and type-safe message passing.
+A minimalist, decoupled modular framework for Rust with an AI-friendly architecture, featuring automated module discovery via compile-time inventory system and type-safe message passing.
 
-一个极简的、解耦的 Rust 模块化框架，采用 AI 友好的架构设计，实现自动模块发现和类型安全的消息传递。
+一个极简的、解耦的 Rust 模块化框架，采用 AI 友好的架构设计，通过编译期 inventory 系统实现自动模块发现，并支持类型安全的消息传递。
 
 ## Usage / 使用方法
 
@@ -36,9 +36,7 @@ impl Module for MyModule {
 module_init!(MyModule, "my_module");
 ```
 
-That's it. The framework will handle the rest.
 
-仅此而已。框架将处理其余工作。
 
 ## License / 许可
 
