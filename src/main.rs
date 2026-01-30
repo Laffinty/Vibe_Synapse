@@ -1,36 +1,64 @@
-// 设置为 Windows GUI 子系统，编译后不显示命令行窗口
-#![windows_subsystem = "windows"]
+// ==============================================================================
+// AI DEVELOPER GUIDE - Vibe_Synapse Framework
+// ==============================================================================
+//
+// [FRAMEWORK OVERVIEW]
+// This is a Rust-based modular application framework with core features:
+// - Automatic module registration via inventory crate
+// - Message bus-driven inter-module communication
+// - Automatic lifecycle management
+//
+// [KEY CONCEPTS]
+// 1. Module: A struct implementing the Module trait, an independent functional unit
+// 2. MessageBus: Message bus for modules to send/receive messages
+// 3. module_init!: Macro to register a module with the framework
+// 4. Message: Data carrier for inter-module communication
+//
+// [MUST READ FOR AI DEVELOPERS]
+// Adding a new module requires TWO STEPS (both are mandatory):
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │ STEP 1: Declare Module (Let Rust compiler know this file exists)         │
+// ├─────────────────────────────────────────────────────────────────────────┤
+// │ Add in the "MODULE DECLARATION AREA" below:                              │
+// │   pub mod your_module_name;                                              │
+// │                                                                          │
+// │ Prerequisite: Your module file must be at:                               │
+// │   src/model/your_module_name/mod.rs                                      │
+// └─────────────────────────────────────────────────────────────────────────┘
+//                                    ↓
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │ STEP 2: Register Module (Let the framework know this module exists)      │
+// ├─────────────────────────────────────────────────────────────────────────┤
+// │ At the bottom of your module file (src/model/your_module_name/mod.rs):   │
+// │   crate::module_init!(YourStructName, "module_name");                    │
+// │                                                                          │
+// │ Note: YourStructName must implement Module trait + Default trait         │
+// └─────────────────────────────────────────────────────────────────────────┘
+//
+// [WHY TWO STEPS? TECHNICAL LIMITATION EXPLAINED]
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │ Q: Why manual mod declaration when using inventory auto-discovery?       │
+// │                                                                          │
+// │ A: How Rust module system works:                                         │
+// │    - Rust compiler only compiles explicitly referenced code files        │
+// │    - Without "mod xxx", src/model/xxx/mod.rs won't be compiled at all    │
+// │    - File not compiled → inventory::submit! won't execute                │
+// │      → auto-discovery fails                                              │
+// │                                                                          │
+// │    Therefore, mod declaration is a Rust requirement. Inventory can only  │
+// │    collect code from "already compiled" files. This is by Rust design,   │
+// │    not a framework flaw.                                                 │
+// └─────────────────────────────────────────────────────────────────────────┘
+//
+// [EXAMPLE: Adding a Logger Module]
+// 1. Create file: src/model/logger/mod.rs
+// 2. Add in MODULE DECLARATION AREA below: pub mod logger;
+// 3. At bottom of logger/mod.rs: crate::module_init!(LoggerModule, "logger");
+// ==============================================================================
 
-// ==============================================================================
-// Vibe_Synapse Framework - Core System (Inventory-based Auto-registration)
-// ==============================================================================
-// A minimalist modular framework with automatic module discovery using inventory crate.
-// 
-// KEY FEATURES:
-// - Zero-configuration module system: Modules auto-register using inventory::submit!
-// - No need to edit main.rs when adding new modules
-// - Type-safe message passing with Arc-based sharing
-// - Single FIFO channel (no complex priority system)
-// - Automatic lifecycle management (initialize/process/shutdown)
-//
-// ARCHITECTURE OVERVIEW:
-// 1. Message Bus: Central hub for typed message passing between modules
-// 2. Module Registry: Manages module lifecycle and auto-discovery
-// 3. Dispatcher: Forwards messages to subscribed modules asynchronously
-// 4. Inventory System: Compile-time collection of module registrations
-//
-// ADDING A NEW MODULE (2 simple steps):
-// Step 1: Create src/model/your_module/mod.rs
-//   - Implement the Module trait for your struct
-//   - Implement Default trait for auto-construction
-//   - Use #[async_trait] for async lifecycle methods
-//
-// Step 2: Add at the bottom of your module file:
-//   module_init!(YourModuleStruct, "your_module_name");
-//
-// That's it! No changes to main.rs, Cargo.toml, or any config files needed.
-// The inventory system automatically discovers and registers your module at compile time.
-// ==============================================================================
+// Windows GUI subsystem setting (no console window after compilation)
+#![windows_subsystem = "windows"]
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -40,18 +68,25 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ==============================================================================
-// MODULE DECLARATION AREA
+// MODULE DECLARATION AREA - Where AI developers add modules
 // ==============================================================================
-// AI DEVELOPER NOTE: 
-// - Each module is a separate subdirectory under src/model/
-// - Module files are named mod.rs within their own directory
-// - Example: src/model/my_module/mod.rs
-// - The inventory system automatically discovers modules via module_init! macro
-// - NO NEED to manually declare modules here - it's handled by inventory!
-
+// [OPERATION GUIDE]
+// For each new module, add one line here: pub mod module_name;
+// The module name must match the subdirectory name under src/model/
+//
+// [CURRENT MODULE LIST]
 mod model {
-    pub mod simple_gui;  // Single GUI demo module
+    pub mod simple_gui;  // GUI demo module, located at src/model/simple_gui/mod.rs
 }
+
+// [TEMPLATE FOR FUTURE MODULES]
+// mod model {
+//     pub mod simple_gui;   // Existing GUI module
+//     pub mod your_module;  // ← Add your module here
+// }
+//
+// ⚠️ IMPORTANT: After modifying this section, remember to add the
+//    module_init! macro call at the bottom of your module file!
 
 // ==============================================================================
 // INVENTORY-BASED AUTO-REGISTRATION SYSTEM
@@ -732,26 +767,27 @@ async fn run_message_dispatcher(
 }
 
 // ==============================================================================
-// MAIN APPLICATION ENTRY POINT - 纯粹框架层 (Pure Framework Layer)
+// MAIN APPLICATION ENTRY POINT - Pure Framework Layer
 // ==============================================================================
-// FRAMEWORK BOOTSTRAPPING SEQUENCE - 框架仅提供基础设施，零业务逻辑
+// FRAMEWORK BOOTSTRAPPING SEQUENCE - Framework only provides infrastructure,
+//                                    zero business logic
 //
-// 框架核心职责（严格遵守）：
+// Framework Core Responsibilities (Strict Adherence):
 // 1. Setup panic handler for error isolation
 // 2. Parse command line arguments (--test mode)
-// 3. Create MessageBus and ModuleRegistry - 基础设施初始化
-// 4. Auto-discover and register all modules via inventory - 编译期自动发现
-// 5. Register built-in SystemMessage type - 内置消息类型注册
-// 6. Send initialization test message - 系统测试
-// 7. Wait for exit signal (Ctrl+C or test timeout) - 统一生命周期管理
-// 8. Graceful shutdown: unregister all modules - 优雅关闭
+// 3. Create MessageBus and ModuleRegistry - Infrastructure initialization
+// 4. Auto-discover and register all modules via inventory - Compile-time discovery
+// 5. Register built-in SystemMessage type - Built-in message type registration
+// 6. Send initialization test message - System test
+// 7. Wait for exit signal (Ctrl+C or test timeout) - Unified lifecycle management
+// 8. Graceful shutdown: unregister all modules - Graceful shutdown
 //
-// 【框架设计黄金法则】
-// - 框架绝不区分模块类型（GUI/CLI/后台服务）
-// - 框架绝不调用模块私有API
-// - 框架绝不对特定模块硬编码
-// - 所有模块在 initialize() 中自主决定是否启动阻塞式主循环
-// - GUI模块使用 tokio::task::spawn_blocking 在模块内部启动，框架无感知
+// [Framework Design Golden Rules]
+// - Framework never distinguishes module types (GUI/CLI/Background service)
+// - Framework never calls module private APIs
+// - Framework never hardcodes specific modules
+// - All modules decide independently in initialize() whether to start blocking loops
+// - GUI modules use tokio::task::spawn_blocking internally, framework is unaware
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -810,9 +846,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
     // Main execution - framework waits for exit signal
-    // 【框架层职责】框架层绝不区分模块类型（GUI/CLI/后台服务）
-    // 所有模块在 initialize() 中自主决定是否启动阻塞式主循环
-    // GUI模块使用 tokio::task::spawn_blocking 在模块内部启动
+    // [Framework Layer Responsibility] Framework never distinguishes module types
+    // All modules decide independently in initialize() whether to start blocking loops
+    // GUI modules use tokio::task::spawn_blocking internally
     if is_test_mode {
         // Test mode: Run for 60 seconds then exit
         println!("\n=== Test Mode - Framework will run for 60 seconds ===");
@@ -820,7 +856,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("\n=== Test completed ===");
     } else {
         // Normal mode: Wait for exit signal (Ctrl+C or GUI closed)
-        // 框架统一处理所有模块，不再有针对特定模块的特殊分支
+        // Framework handles all modules uniformly, no special branches for specific modules
         println!("\n=== Framework Running ===");
         println!("Press Ctrl+C to exit...");
         
@@ -855,136 +891,177 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 // ==============================================================================
-// AI DEVELOPER USAGE GUIDE (INVENTORY-BASED SYSTEM)
+// AI DEVELOPER REFERENCE - Complete Development Guide
 // ==============================================================================
 //
-// ADDING A NEW MODULE (2 simple steps, no main.rs changes):
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃  Complete Workflow for Adding New Modules (Must complete both steps)       ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 //
-// Step 1: Create src/model/your_module/mod.rs
-//   - Define your module struct
-//   - Implement Module trait using #[async_trait]
-//   - Implement Default trait for construction
-//   - Register message types and subscribe in initialize()
+// ┌────────────────────────────────────────────────────────────────────────────┐
+// │ Step 1: Declare Module (in main.rs)                                        │
+// ├────────────────────────────────────────────────────────────────────────────┤
+// │ 1. Find the "MODULE DECLARATION AREA" above                                │
+// │ 2. Add in the mod model { } block:                                         │
+// │      pub mod your_module_name;                                             │
+// │ 3. Create directory under src/model/: your_module_name/                    │
+// │ 4. Create mod.rs file in that directory                                    │
+// └────────────────────────────────────────────────────────────────────────────┘
+//                                      ↓
+// ┌────────────────────────────────────────────────────────────────────────────┐
+// │ Step 2: Implement and Register Module (in your mod.rs)                     │
+// ├────────────────────────────────────────────────────────────────────────────┤
+// │ Create your module file following the template below:                      │
+// └────────────────────────────────────────────────────────────────────────────┘
+
+/*
+// File: src/model/my_module/mod.rs
+
+use async_trait::async_trait;
+use std::sync::Arc;
+use crate::{Message, MessageEnvelope, MessageBus, Module};
+use std::any::{Any, TypeId};
+use tokio::sync::RwLock;
+
+// ========== Module Struct ==========
+pub struct MyModule {
+    name: &'static str,
+    bus: Arc<RwLock<Option<Arc<MessageBus>>>>,
+}
+
+impl MyModule {
+    pub fn new() -> Self {
+        Self {
+            name: "my_module",
+            bus: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
+impl Default for MyModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ========== Module Lifecycle Implementation ==========
+#[async_trait]
+impl Module for MyModule {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    
+    async fn initialize(&mut self, bus: Arc<MessageBus>) 
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
+    {
+        // Save bus reference (optional, needed if sending messages)
+        *self.bus.write().await = Some(bus.clone());
+        
+        // Register and subscribe to message types (if needed)
+        // let msg_type = bus.register_message_type::<MyMessage>().await;
+        // bus.subscribe(msg_type, self.name().to_string()).await;
+        
+        println!("[MyModule] Initialized");
+        Ok(())
+    }
+    
+    async fn process_message(&self, _envelope: MessageEnvelope) 
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
+    {
+        // Handle received messages
+        Ok(())
+    }
+    
+    async fn shutdown(&mut self) 
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
+    {
+        println!("[MyModule] Shutting down");
+        Ok(())
+    }
+}
+
+// ========== Auto-registration (Must be at bottom of file) ==========
+crate::module_init!(MyModule, "my_module");
+
+// ========== Optional: Define Message Types ==========
+#[derive(Clone)]
+pub struct MyMessage {
+    pub data: String,
+}
+
+impl Message for MyMessage {
+    fn as_any(&self) -> &dyn Any { self }
+    fn message_type(&self) -> TypeId { TypeId::of::<Self>() }
+    fn clone_box(&self) -> Box<dyn Message> { Box::new(self.clone()) }
+}
+*/
+
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃  Inter-Module Communication Guide                                          ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 //
-// Step 2: Add at bottom of your module file:
-//   module_init!(YourModuleStruct, "your_module_name");
+// [Defining Message Types]
+// Define message structs in sender or common location, implement Message trait:
 //
-// That's it! The inventory system automatically:
-// - Discovers your module at compile time
-// - Constructs it via Default::default()
-// - Calls initialize() with Arc<MessageBus>
-// - Registers it with the ModuleRegistry
-// - Manages its entire lifecycle
+//   #[derive(Clone)]
+//   pub struct MyMessage {
+//       pub data: String,
+//   }
 //
-// EXAMPLE MODULE FILE (src/model/my_module/mod.rs):
+//   impl Message for MyMessage {
+//       fn as_any(&self) -> &dyn Any { self }
+//       fn message_type(&self) -> TypeId { TypeId::of::<MyMessage>() }
+//       fn clone_box(&self) -> Box<dyn Message> { Box::new(self.clone()) }
+//   }
 //
-// use async_trait::async_trait;
-// use std::sync::Arc;
-// use crate::{MessageEnvelope, MessageBus, Module};
+// [Sending Messages]
+//   bus.publish(MyMessage { data: "hello".to_string() }).await?;
 //
-// pub struct MyModule {
-//     name: &'static str,
-//     bus: Arc<RwLock<Option<Arc<MessageBus>>>>,
-// }
-//
-// impl MyModule {
-//     pub fn new() -> Self {
-//         Self {
-//             name: "my_module",
-//             bus: Arc::new(RwLock::new(None)),
-//         }
-//     }
-// }
-//
-// impl Default for MyModule {
-//     fn default() -> Self {
-//         Self::new()
-//     }
-// }
-//
-// #[async_trait]
-// impl Module for MyModule {
-//     fn name(&self) -> &'static str {
-//         self.name
-//     }
-//     
-//     async fn initialize(&mut self, bus: Arc<MessageBus>) -> Result<(), Box<dyn Error>> {
-//         self.bus.write().await = Some(bus.clone());
-//         
-//         // Register and subscribe to message types
-//         let msg_type = bus.register_message_type::<MyMessage>().await;
-//         bus.subscribe(msg_type, self.name().to_string()).await;
-//         
-//         Ok(())
-//     }
-//     
-//     async fn process_message(&self, envelope: MessageEnvelope) -> Result<(), Box<dyn Error>> {
-//         // Handle messages here
-//         Ok(())
-//     }
-//     
-//     async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
-//         // Cleanup here
-//         Ok(())
-//     }
-// }
-//
-// // Add this line at the very bottom of the file for auto-registration:
-// module_init!(MyModule, "my_module");
-//
-// MESSAGING BETWEEN MODULES:
-//
-// 1. Define a message type (implementing Message trait):
-//    #[derive(Clone)]
-//    pub struct MyMessage {
-//        pub data: String,
-//    }
-//
-//    impl Message for MyMessage {
-//        fn as_any(&self) -> &dyn Any { self }
-//        fn message_type(&self) -> TypeId { TypeId::of::<MyMessage>() }
-//        fn clone_box(&self) -> Box<dyn Message> { Box::new(self.clone()) }
-//    }
-//
-// 2. In sender module, publish:
-//    bus.publish(MyMessage { data: "hello".to_string() }).await?;
-//
-// 3. In receiver module, subscribe during initialize():
+// [Receiving Messages]
+// 1. Register and subscribe in initialize():
 //    let msg_type = bus.register_message_type::<MyMessage>().await;
 //    bus.subscribe(msg_type, self.name().to_string()).await;
 //
-// 4. In process_message(), check type and handle:
+// 2. Handle in process_message():
 //    if envelope.message_type == TypeId::of::<MyMessage>() {
 //        if let Some(msg) = envelope.payload.as_any().downcast_ref::<MyMessage>() {
 //            println!("Received: {}", msg.data);
 //        }
 //    }
 //
-// DEBUGGING TIPS:
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃  Troubleshooting Guide                                                     ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 //
-// 1. Module not being registered?
-//    - Check that module_init! macro is at bottom of file
-//    - Verify struct implements Default trait
-//    - Ensure module file is in src/model/ directory
+// [Module not loading?]
+// □ Did you add pub mod xxx; in MODULE DECLARATION AREA in main.rs?
+// □ Did you add crate::module_init!(...); at bottom of your module file?
+// □ Does your module struct implement Default trait?
+// □ Does your module struct implement Module trait?
+// □ Any compilation errors? (run cargo check)
 //
-// 2. Messages not being received?
-//    - Verify bus.subscribe() called during initialize()
-//    - Check that bus.register_message_type::<M>() called before subscribe
-//    - Ensure message type matches in both publisher and subscriber
+// [Messages not received?]
+// □ Did you call bus.register_message_type::<M>().await?
+// □ Did you call bus.subscribe(type_id, ...).await?
+// □ Does message type match? (Sender and receiver use same type)
+// □ Does subscriber name match module name() return value?
 //
-// 3. Module initialization failing?
-//    - Check that initialize() is non-blocking (no heavy I/O)
-//    - Verify all unwrap() calls have proper error handling
-//    - Ensure module name is unique
+// [Module initialization failing?]
+// □ Is initialize() blocking? (Should not block; use spawn_blocking for GUI/IO)
+// □ Any unwrap() causing panic?
+// □ Is module name unique? (Cannot duplicate other modules)
 //
-// PERFORMANCE BEST PRACTICES:
+// ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+// ┃  Performance Best Practices                                                ┃
+// ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 //
-// - Implement efficient clone_box() (avoid deep clones if possible)
-// - Process messages quickly in process_message() or spawn tasks
+// - Keep clone_box() implementation efficient (avoid deep copies)
+// - process_message() must not block; spawn tasks for heavy operations
 // - Use Arc<RwLock<T>> for shared state (not Arc<Mutex<T>> unless needed)
-// - Prefer message passing over direct function calls
-// - Keep initialize() lightweight - do heavy work in separate tasks
+// - Prefer message passing over direct function calls to other modules
+// - Keep initialize() lightweight; heavy init operations in separate tasks
 //
-// HAPPY CODING! The framework handles all the boilerplate for you.
-// Just focus on writing your module logic!
+// ==============================================================================
+// HAPPY CODING! The framework handles all the boilerplate, just focus on your
+// business logic!
 // ==============================================================================
