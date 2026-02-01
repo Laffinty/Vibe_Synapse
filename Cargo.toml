@@ -21,8 +21,13 @@ inventory = "0.3"
 eframe = { version = "0.28", features = ["persistence"] }
 egui = "0.28"
 winit = "0.29"  # Required for event_loop_builder configuration
-tracing-subscriber = "0.3"
-tracing = "0.1"
+
+# 日志和跟踪
+tracing = { version = "0.1", features = ["attributes"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# 错误处理增强
+anyhow = { version = "1.0", optional = true }
 
 [[bin]]
 name = "vibe_synapse"
